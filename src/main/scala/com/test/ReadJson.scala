@@ -1,88 +1,57 @@
 package com.test
-
-import com.example.SparkInitializer
-import org.apache.kafka.common.serialization.StringDeserializer
 import org.apache.log4j.{Level, Logger}
-import org.apache.spark.sql.types.{ArrayType, LongType, MapType, StringType, StructField, StructType}
-import org.apache.spark.streaming.kafka010.ConsumerStrategies.Subscribe
-import org.apache.spark.streaming.kafka010.KafkaUtils
-import org.apache.spark.streaming.kafka010.LocationStrategies.PreferConsistent
-import org.apache.spark.streaming.{Seconds, StreamingContext}
+import org.apache.spark.sql.functions._
+import org.apache.spark.sql._
+import org.apache.spark.sql.types.LongType
 
 object ReadJson {
   def main(args: Array[String]): Unit = {
+    // Create SparkSession
     Logger.getLogger("org").setLevel(Level.ERROR)
-    val spark = SparkInitializer.initializeSpark()
+    val spark = SparkSession.builder()
+      .appName("KafkaJsonToDF")
+      .master("local[*]")
+      .getOrCreate()
 
-    // Initialize StreamingContext with a batch interval of 5 seconds
-    val streamingContext = new StreamingContext(spark.sparkContext, Seconds(5))
+    val kafkaDF = spark.readStream
+      .format("kafka")
+      .option("kafka.bootstrap.servers", "localhost:9092")
+      .option("subscribe", "my-topic")
+      .load()
+      .selectExpr("CAST(value AS STRING)")
 
-    // Kafka parameters
-    val kafkaParams = Map[String, Object](
-      "bootstrap.servers" -> "localhost:9092",
-      "key.deserializer" -> classOf[StringDeserializer],
-      "value.deserializer" -> classOf[StringDeserializer],
-      "group.id" -> "spark-streaming-consumer",
-      "auto.offset.reset" -> "latest",
-      "enable.auto.commit" -> (false: java.lang.Boolean)
-    )
+    val flattenedDF = kafkaDF
+      .withColumn("eid", get_json_object(col("value"), "$.eid"))
+      .withColumn("ets", get_json_object(col("value"), "$.ets").cast(LongType))
+      .withColumn("ver", get_json_object(col("value"), "$.ver"))
+      .withColumn("mid", get_json_object(col("value"), "$.mid"))
+      .withColumn("actor_id", get_json_object(col("value"), "$.actor.id"))
+      .withColumn("actor_type", get_json_object(col("value"), "$.actor.type"))
+      .withColumn("context_channel", get_json_object(col("value"), "$.context.channel"))
+      .withColumn("context_pdata_id", get_json_object(col("value"), "$.context.pdata.id"))
+      .withColumn("context_pdata_ver", get_json_object(col("value"), "$.context.pdata.ver"))
+      .withColumn("context_pdata_pid", get_json_object(col("value"), "$.context.pdata.pid"))
+      .withColumn("context_env", get_json_object(col("value"), "$.context.env"))
+      .withColumn("context_sid", get_json_object(col("value"), "$.context.sid"))
+      .withColumn("context_did", get_json_object(col("value"), "$.context.did"))
+      .withColumn("context_cdata", get_json_object(col("value"), "$.context.cdata"))
+      .withColumn("context_rollup", get_json_object(col("value"), "$.context.rollup"))
+      .withColumn("object", get_json_object(col("value"), "$.object"))
+      .withColumn("tags", get_json_object(col("value"), "$.tags"))
+      .withColumn("edata_type", get_json_object(col("value"), "$.edata.type"))
+      .withColumn("edata_mode", get_json_object(col("value"), "$.edata.mode"))
+      .withColumn("edata_pageid", get_json_object(col("value"), "$.edata.pageid"))
+      .withColumn("edata_duration", get_json_object(col("value"), "$.edata.duration").cast(LongType))
+      .drop("value")
+    flattenedDF.printSchema()
 
-    val topics = Array("read-json")
-    val stream = KafkaUtils.createDirectStream[String, String](
-      streamingContext,
-      PreferConsistent,
-      Subscribe[String, String](topics, kafkaParams)
-    )
-    // Extracting the JSON data from the Kafka stream
-    val jsonData = stream.map(record => record.value())
+    // Write the flattened DataFrame to a console sink for demonstration
+    val query = flattenedDF.writeStream
+      .outputMode("append")
+      .format("console")
+      .option("truncate", false)
+      .start()
 
-    // Define the schema for the JSON data
-    val schema: StructType = StructType(Seq(
-      StructField("eid", StringType),
-      StructField("ets", LongType),
-      StructField("ver", StringType),
-      StructField("mid", StringType),
-      StructField("actor", StructType(Seq(
-        StructField("id", StringType),
-        StructField("type", StringType)
-      ))),
-      StructField("context", StructType(Seq(
-        StructField("channel", StringType),
-        StructField("pdata", StructType(Seq(
-          StructField("id", StringType),
-          StructField("ver", StringType),
-          StructField("pid", StringType)
-        ))),
-        StructField("env", StringType),
-        StructField("sid", StringType),
-        StructField("did", StringType),
-        StructField("cdata", ArrayType(StringType)),
-        StructField("rollup", MapType(StringType, StringType))
-      ))),
-      StructField("object", MapType(StringType, StringType)),
-      StructField("tags", ArrayType(StringType)),
-      StructField("edata", StructType(Seq(
-        StructField("type", StringType),
-        StructField("mode", StringType),
-        StructField("pageid", StringType),
-        StructField("duration", LongType)
-      )))
-    ))
-    // After extracting the JSON data from the Kafka stream
-    jsonData.foreachRDD { rdd =>
-      import spark.implicits._
-
-      // Create a DataFrame from JSON data with explicit schema and handling malformed records
-      val df = spark.read
-        .schema(schema) // Specify the schema explicitly
-        .option("mode", "PERMISSIVE") // Handle malformed records
-        .json(spark.createDataset(rdd)) // Use json(Dataset[String]) instead of json(RDD[String])
-
-      // Display the DataFrame contents
-      df.show()
-    }
-    streamingContext.start()
-    // Wait for the termination
-    streamingContext.awaitTermination()
+    query.awaitTermination()
   }
 }
